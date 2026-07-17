@@ -29,6 +29,8 @@ from translations import t
 from chatbot import get_bot_response
 from billing import BillingManager
 from employee_management import EmployeeManager, ROLES, ATTENDANCE_STATUSES, SHIFT_NAMES
+from seasonal_analytics import SeasonalAnalytics
+from click_and_collect import ClickAndCollectManager, PICKUP_SLOTS, STATUS_FLOW
 # Page configuration
 st.set_page_config(
     page_title="MVA MART",
@@ -170,7 +172,17 @@ st.markdown("""
         border-radius: 20px;
         padding: 22px 24px 30px 24px;
     }
+    .st-key-click_collect_dashboard {
+        background: linear-gradient(180deg, #0b1220 0%, #111a2e 100%);
+        border-radius: 20px;
+        padding: 22px 24px 30px 24px;
+    }
     .st-key-employees_dashboard {
+        background: linear-gradient(180deg, #0b1220 0%, #111a2e 100%);
+        border-radius: 20px;
+        padding: 22px 24px 30px 24px;
+    }
+    .st-key-seasonal_dashboard {
         background: linear-gradient(180deg, #0b1220 0%, #111a2e 100%);
         border-radius: 20px;
         padding: 22px 24px 30px 24px;
@@ -295,6 +307,8 @@ AICustomerManager.ensure_table()
 DiscountLogManager.ensure_table()
 BillingManager.ensure_tables()
 EmployeeManager.ensure_tables()
+SeasonalAnalytics.ensure_tables()
+ClickAndCollectManager.ensure_tables()
 
 
 def show_language_switcher():
@@ -361,7 +375,7 @@ def show_top_bar():
 
         with st.popover("🤖", use_container_width=True):
             st.markdown("**🤖 MVA Mart Assistant**")
-            st.caption("Ask me anything about this project, no limit on questions!")
+            st.caption("Powered by Google Gemini — ask me anything about this project, no limit on questions!")
 
             history_box = st.container(height=280)
             with history_box:
@@ -578,9 +592,11 @@ NAV_LABELS = {
     "📦 Inventory": "nav_inventory",
     "🛒 Sales": "nav_sales",
     "🧾 Billing": "nav_billing",
+    "🏬 Click & Collect": "nav_click_collect",
     "👥 Employees": "nav_employees",
     "🤖 AI Customers": "nav_ai_customers",
     "📈 Analytics": "nav_analytics",
+    "🌦️ Seasonal": "nav_seasonal",
     "🔮 Forecasting": "nav_forecasting",
     "⚠️ Alerts": "nav_alerts",
     "📥 Restock": "nav_restock",
@@ -1180,7 +1196,9 @@ elif page == "🧾 Billing":
         billing_cards_html += '</div>'
         st.markdown(billing_cards_html, unsafe_allow_html=True)
 
-        bill_tab1, bill_tab2, bill_tab3 = st.tabs(["🧾 New Bill", "↩️ Returns & Refunds", "📜 Bill History"])
+        bill_tab1, bill_tab2, bill_tab3, bill_tab4 = st.tabs(
+            ["🧾 New Bill", "↩️ Returns & Refunds", "📜 Bill History", "🧮 GST Calculator"]
+        )
 
         # ============================= NEW BILL (Fast Billing) =============================
         with bill_tab1:
@@ -1246,27 +1264,40 @@ elif page == "🧾 Billing":
 
                     subtotal = float(cart_df['line_total'].sum())
 
-                    col1, col2 = st.columns(2)
+                    col1, col2, col3 = st.columns(3)
                     with col1:
                         gst_percent = st.selectbox("GST %", [0, 5, 12, 18, 28], index=1, key="billing_gst")
                     with col2:
+                        gst_type = st.selectbox(
+                            "GST Type",
+                            ["Intra-State (CGST+SGST)", "Inter-State (IGST)"],
+                            key="billing_gst_type"
+                        )
+                    with col3:
                         payment_method = st.radio("Payment Method", ["Cash", "UPI", "Card", "Wallet"], horizontal=True, key="billing_payment")
 
                     customer_name = st.text_input("Customer Name (optional)", key="billing_customer_name")
 
-                    gst_amount = subtotal * gst_percent / 100
-                    total_amount = subtotal + gst_amount
+                    gst_amount, cgst_amount, sgst_amount, igst_amount, total_amount = BillingManager.calculate_gst_breakdown(
+                        subtotal, gst_percent, gst_type
+                    )
 
-                    m1, m2, m3 = st.columns(3)
+                    m1, m2 = st.columns(2)
                     m1.metric("Subtotal", f"₹{subtotal:,.2f}")
-                    m2.metric(f"GST ({gst_percent}%)", f"₹{gst_amount:,.2f}")
-                    m3.metric("Total", f"₹{total_amount:,.2f}")
+                    m2.metric("Total (incl. GST)", f"₹{total_amount:,.2f}")
+
+                    if gst_type == "Inter-State (IGST)":
+                        st.metric(f"IGST ({gst_percent}%)", f"₹{igst_amount:,.2f}")
+                    else:
+                        gc1, gc2 = st.columns(2)
+                        gc1.metric(f"CGST ({gst_percent/2}%)", f"₹{cgst_amount:,.2f}")
+                        gc2.metric(f"SGST ({gst_percent/2}%)", f"₹{sgst_amount:,.2f}")
 
                     b1, b2 = st.columns(2)
                     with b1:
                         if st.button("💳 Checkout", use_container_width=True):
                             success, msg, bill_id = BillingManager.checkout(
-                                st.session_state.billing_cart, payment_method, gst_percent, customer_name
+                                st.session_state.billing_cart, payment_method, gst_percent, customer_name, gst_type
                             )
                             if success:
                                 st.session_state.last_bill_id = bill_id
@@ -1294,11 +1325,20 @@ elif page == "🧾 Billing":
                     inv_df = pd.DataFrame(items)[['product_name', 'quantity', 'unit_price', 'line_total']]
                     st.dataframe(inv_df, use_container_width=True)
 
-                    ic1, ic2, ic3, ic4 = st.columns(4)
+                    ic1, ic2 = st.columns(2)
                     ic1.metric("Subtotal", f"₹{bill['subtotal']:,.2f}")
-                    ic2.metric(f"GST ({bill['gst_percent']}%)", f"₹{bill['gst_amount']:,.2f}")
-                    ic3.metric("Total", f"₹{bill['total_amount']:,.2f}")
-                    ic4.metric("Payment", bill['payment_method'])
+                    ic2.metric("Total (incl. GST)", f"₹{bill['total_amount']:,.2f}")
+
+                    igst_val = bill.get('igst_amount') or 0
+                    if igst_val:
+                        gic1, gic2 = st.columns(2)
+                        gic1.metric(f"IGST ({bill['gst_percent']}%)", f"₹{igst_val:,.2f}")
+                        gic2.metric("Payment Method", bill['payment_method'])
+                    else:
+                        gic1, gic2, gic3 = st.columns(3)
+                        gic1.metric(f"CGST ({bill['gst_percent']/2}%)", f"₹{(bill.get('cgst_amount') or 0):,.2f}")
+                        gic2.metric(f"SGST ({bill['gst_percent']/2}%)", f"₹{(bill.get('sgst_amount') or 0):,.2f}")
+                        gic3.metric("Payment Method", bill['payment_method'])
 
                     receipt_text = BillingManager.generate_thermal_receipt_text(bill, items)
 
@@ -1404,6 +1444,222 @@ elif page == "🧾 Billing":
                 st.dataframe(bills_df, use_container_width=True)
             else:
                 st.info("No bills yet.")
+
+        # ============================= GST CALCULATOR (standalone) =============================
+        with bill_tab4:
+            st.markdown('<div class="section-title">🧮 GST & Tax Calculator</div>', unsafe_allow_html=True)
+            st.caption("Quick standalone calculator — doesn't create a bill, just works out the numbers.")
+
+            gc1, gc2 = st.columns(2)
+            with gc1:
+                calc_amount = st.number_input("Amount (₹)", min_value=0.0, value=1000.0, step=100.0, key="gst_calc_amount")
+                calc_amount_type = st.radio(
+                    "This amount is", ["Before GST (add GST on top)", "After GST (extract GST from total)"],
+                    key="gst_calc_amount_type"
+                )
+            with gc2:
+                calc_gst_percent = st.selectbox("GST %", [0, 5, 12, 18, 28], index=1, key="gst_calc_percent")
+                calc_gst_type = st.selectbox(
+                    "GST Type", ["Intra-State (CGST+SGST)", "Inter-State (IGST)"], key="gst_calc_type"
+                )
+
+            if calc_amount_type == "Before GST (add GST on top)":
+                calc_subtotal = calc_amount
+            else:
+                # Reverse-calculate: amount already includes GST
+                calc_subtotal = calc_amount / (1 + calc_gst_percent / 100)
+
+            calc_gst, calc_cgst, calc_sgst, calc_igst, calc_total = BillingManager.calculate_gst_breakdown(
+                calc_subtotal, calc_gst_percent, calc_gst_type
+            )
+
+            st.markdown("---")
+            rc1, rc2 = st.columns(2)
+            rc1.metric("Taxable Amount (before GST)", f"₹{calc_subtotal:,.2f}")
+            rc2.metric("Total (incl. GST)", f"₹{calc_total:,.2f}")
+
+            if calc_gst_type == "Inter-State (IGST)":
+                st.metric(f"IGST ({calc_gst_percent}%)", f"₹{calc_igst:,.2f}")
+            else:
+                gci1, gci2 = st.columns(2)
+                gci1.metric(f"CGST ({calc_gst_percent/2}%)", f"₹{calc_cgst:,.2f}")
+                gci2.metric(f"SGST ({calc_gst_percent/2}%)", f"₹{calc_sgst:,.2f}")
+
+elif page == "🏬 Click & Collect":
+    with st.container(key="click_collect_dashboard"):
+        st.markdown(
+            '<div class="dash-header"><div class="dash-header-icon">🏬</div>'
+            f'<div class="dash-header-title">{t("click_collect_header")}</div></div>',
+            unsafe_allow_html=True
+        )
+        st.caption("Order online, pick up in-store — no delivery needed.")
+
+        all_cnc_orders = ClickAndCollectManager.get_orders(limit=200)
+        placed_count = len([o for o in all_cnc_orders if o['status'] == 'Placed'])
+        preparing_count = len([o for o in all_cnc_orders if o['status'] == 'Preparing'])
+        ready_count = len([o for o in all_cnc_orders if o['status'] == 'Ready for Pickup'])
+        picked_up_count = len([o for o in all_cnc_orders if o['status'] == 'Picked Up'])
+
+        cnc_kpi_cards = [
+            ("🆕", "#5b7bf7", "New Orders", f"{placed_count}", "Just placed"),
+            ("👨‍🍳", "#f6a623", "Preparing", f"{preparing_count}", "Being packed"),
+            ("✅", "#2ecc91", "Ready for Pickup", f"{ready_count}", "Waiting for customer"),
+            ("🎉", "#22c1c3", "Picked Up", f"{picked_up_count}", "Completed"),
+        ]
+        cnc_cards_html = '<div class="kpi-row">'
+        for icon, color, label, value, sub in cnc_kpi_cards:
+            cnc_cards_html += (
+                '<div class="kpi-card">'
+                f'<div class="kpi-icon" style="background:{color}22; color:{color};">{icon}</div>'
+                f'<div class="kpi-label">{label}</div>'
+                f'<div class="kpi-value" style="color:{color};">{value}</div>'
+                f'<div class="kpi-sub">{sub}</div>'
+                '</div>'
+            )
+        cnc_cards_html += '</div>'
+        st.markdown(cnc_cards_html, unsafe_allow_html=True)
+
+        cnc_tab1, cnc_tab2 = st.tabs(["🛍️ Shop & Order", "📋 Manage Orders"])
+
+        # ============================= SHOP & ORDER =============================
+        with cnc_tab1:
+            if 'cnc_cart' not in st.session_state:
+                st.session_state.cnc_cart = []
+
+            CATEGORY_ICONS = {
+                "Personal Care": "🧴", "Dairy": "🥛", "Bakery": "🍞", "Biscuits": "🍪",
+                "Instant Foods": "🍜", "Detergent": "🧼", "Condiments": "🧂", "Staples": "🌾",
+                "Snacks": "🍿", "Beverages": "🥤", "Other": "🛒"
+            }
+
+            st.markdown('<div class="section-title">🛍️ Product Catalog</div>', unsafe_allow_html=True)
+            try:
+                cnc_products = InventoryManager.get_all_products()
+            except Exception:
+                cnc_products = pd.DataFrame()
+
+            if not cnc_products.empty:
+                cat_filter = st.selectbox("Filter by category", ["All"] + sorted(cnc_products['category'].unique().tolist()), key="cnc_cat_filter")
+                display_products = cnc_products if cat_filter == "All" else cnc_products[cnc_products['category'] == cat_filter]
+
+                cols = st.columns(4)
+                for idx, (_, prod) in enumerate(display_products.iterrows()):
+                    with cols[idx % 4]:
+                        with st.container(border=True):
+                            icon = CATEGORY_ICONS.get(prod['category'], "🛒")
+                            st.markdown(f"<div style='font-size:40px; text-align:center;'>{icon}</div>", unsafe_allow_html=True)
+                            st.markdown(f"**{prod['product_name']}**")
+                            st.caption(f"{prod['category']}")
+                            st.write(f"₹{prod['selling_price']:.2f}")
+                            st.caption(f"Stock: {int(prod['stock'])}")
+                            qty_key = f"cnc_qty_{prod['product_id']}"
+                            qty = st.number_input("Qty", min_value=1, max_value=max(1, int(prod['stock'])), value=1, key=qty_key)
+                            if st.button("➕ Add", key=f"cnc_add_{prod['product_id']}", use_container_width=True):
+                                st.session_state.cnc_cart.append({
+                                    "product_id": int(prod['product_id']),
+                                    "product_name": prod['product_name'],
+                                    "quantity": int(qty),
+                                    "unit_price": float(prod['selling_price'])
+                                })
+                                st.rerun()
+            else:
+                st.info("No products in inventory yet.")
+
+            st.markdown('<div class="section-title">🛒 Your Cart</div>', unsafe_allow_html=True)
+            if st.session_state.cnc_cart:
+                cnc_cart_df = pd.DataFrame(st.session_state.cnc_cart)
+                cnc_cart_df['line_total'] = cnc_cart_df['quantity'] * cnc_cart_df['unit_price']
+                st.dataframe(cnc_cart_df, use_container_width=True)
+                cnc_total = float(cnc_cart_df['line_total'].sum())
+                st.metric("Cart Total", f"₹{cnc_total:,.2f}")
+
+                st.markdown('<div class="section-title">📅 Pickup Details</div>', unsafe_allow_html=True)
+                with st.form("cnc_checkout_form"):
+                    pc1, pc2, pc3 = st.columns(3)
+                    with pc1:
+                        cnc_customer_name = st.text_input("Your Name")
+                    with pc2:
+                        cnc_phone = st.text_input("Phone Number")
+                    with pc3:
+                        cnc_slot = st.selectbox("Pickup Time Slot", PICKUP_SLOTS)
+
+                    cc1, cc2 = st.columns(2)
+                    with cc1:
+                        place_clicked = st.form_submit_button("✅ Place Order", use_container_width=True)
+                    with cc2:
+                        clear_clicked = st.form_submit_button("🗑️ Clear Cart", use_container_width=True)
+
+                    if place_clicked:
+                        success, msg, order_id = ClickAndCollectManager.place_order(
+                            cnc_customer_name, cnc_phone, cnc_slot, st.session_state.cnc_cart
+                        )
+                        if success:
+                            st.session_state.cnc_cart = []
+                            st.session_state.last_cnc_order = order_id
+                            st.success(f"✅ {msg} — Order #{order_id}")
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg}")
+
+                    if clear_clicked:
+                        st.session_state.cnc_cart = []
+                        st.rerun()
+            else:
+                st.info("Your cart is empty — add products from the catalog above.")
+
+            if st.session_state.get('last_cnc_order'):
+                order, order_items = ClickAndCollectManager.get_order(st.session_state.last_cnc_order)
+                if order:
+                    st.markdown("---")
+                    st.markdown(f'<div class="section-title">📦 Order #{order["order_id"]} Confirmation</div>', unsafe_allow_html=True)
+                    st.write(f"**Pickup Slot:** {order['pickup_slot']}")
+                    st.write(f"**Total:** ₹{order['total_amount']:,.2f}")
+                    st.write(f"**Status:** {order['status']}")
+                    st.dataframe(pd.DataFrame(order_items)[['product_name', 'quantity', 'unit_price', 'line_total']], use_container_width=True)
+
+        # ============================= MANAGE ORDERS (staff) =============================
+        with cnc_tab2:
+            st.markdown('<div class="section-title">📋 Active Orders</div>', unsafe_allow_html=True)
+            active_orders = [o for o in all_cnc_orders if o['status'] in STATUS_FLOW and o['status'] != 'Picked Up']
+
+            if active_orders:
+                for order in active_orders:
+                    with st.container(border=True):
+                        st.write(f"**Order #{order['order_id']}** — {order['customer_name']} ({order['phone']})")
+                        st.caption(f"Pickup: {order['pickup_slot']}  |  Total: ₹{order['total_amount']:,.2f}  |  Placed: {order['created_at']}")
+
+                        # Visual progress tracker
+                        step_idx = STATUS_FLOW.index(order['status']) if order['status'] in STATUS_FLOW else 0
+                        progress_html = '<div style="display:flex; gap:6px; margin:8px 0;">'
+                        for i, step in enumerate(STATUS_FLOW):
+                            color = "#2ecc91" if i <= step_idx else "#3a4a63"
+                            progress_html += f'<div style="flex:1; height:8px; border-radius:4px; background:{color};"></div>'
+                        progress_html += '</div>'
+                        st.markdown(progress_html, unsafe_allow_html=True)
+                        st.caption(" → ".join(STATUS_FLOW))
+
+                        oc1, oc2 = st.columns(2)
+                        with oc1:
+                            if order['status'] != STATUS_FLOW[-1]:
+                                if st.button(f"➡️ Advance to next stage", key=f"advance_{order['order_id']}", use_container_width=True):
+                                    success, msg = ClickAndCollectManager.advance_status(order['order_id'])
+                                    if success:
+                                        st.success(msg)
+                                    st.rerun()
+                        with oc2:
+                            if order['status'] == 'Placed':
+                                if st.button("❌ Cancel Order", key=f"cancel_{order['order_id']}", use_container_width=True):
+                                    ClickAndCollectManager.cancel_order(order['order_id'])
+                                    st.rerun()
+            else:
+                st.info("No active orders right now.")
+
+            st.markdown('<div class="section-title">📜 All Orders</div>', unsafe_allow_html=True)
+            if all_cnc_orders:
+                orders_df = pd.DataFrame([dict(o) for o in all_cnc_orders])
+                st.dataframe(orders_df, use_container_width=True)
+            else:
+                st.info("No orders yet.")
 
 elif page == "👥 Employees":
     with st.container(key="employees_dashboard"):
@@ -1816,6 +2072,172 @@ elif page == "📈 Analytics":
                     st.info("No sales yet.")
             except Exception as e:
                 st.error(f"Error: {e}")
+
+elif page == "🌦️ Seasonal":
+    with st.container(key="seasonal_dashboard"):
+        st.markdown(
+            '<div class="dash-header"><div class="dash-header-icon">🌦️</div>'
+            f'<div class="dash-header-title">{t("seasonal_header")}</div></div>',
+            unsafe_allow_html=True
+        )
+        st.caption("Compares your sales across Summer / Winter / Monsoon / Festival periods, and Weekend vs Weekday.")
+
+        try:
+            seasonal_sales_df = SalesManager.get_sales_data(days=365)
+        except Exception as e:
+            seasonal_sales_df = pd.DataFrame()
+            st.error(f"Error loading sales data: {e}")
+
+        if not seasonal_sales_df.empty:
+            season_summary = SeasonalAnalytics.get_season_comparison(seasonal_sales_df)
+            weekend_summary = SeasonalAnalytics.get_weekend_weekday_comparison(seasonal_sales_df)
+
+            best_season = season_summary.iloc[0]['category'] if not season_summary.empty else "N/A"
+            weekend_rev = weekend_summary[weekend_summary['day_type'] == 'Weekend']['revenue'].sum() if not weekend_summary.empty else 0
+            weekday_rev = weekend_summary[weekend_summary['day_type'] == 'Weekday']['revenue'].sum() if not weekend_summary.empty else 0
+            festival_rev = season_summary[season_summary['category'] == 'Festival']['revenue'].sum() if not season_summary.empty else 0
+        else:
+            season_summary = pd.DataFrame()
+            weekend_summary = pd.DataFrame()
+            best_season = "N/A"
+            weekend_rev = weekday_rev = festival_rev = 0
+
+        seasonal_kpi_cards = [
+            ("🏆", "#5b7bf7", "Best Performing Period", f"{best_season}", "By revenue (last 365 days)"),
+            ("🎉", "#f6a623", "Festival Revenue", f"₹{festival_rev:,.0f}", "During defined festival periods"),
+            ("📅", "#2ecc91", "Weekend Revenue", f"₹{weekend_rev:,.0f}", "Sat + Sun"),
+            ("📆", "#22c1c3", "Weekday Revenue", f"₹{weekday_rev:,.0f}", "Mon-Fri"),
+        ]
+        seasonal_cards_html = '<div class="kpi-row">'
+        for icon, color, label, value, sub in seasonal_kpi_cards:
+            seasonal_cards_html += (
+                '<div class="kpi-card">'
+                f'<div class="kpi-icon" style="background:{color}22; color:{color};">{icon}</div>'
+                f'<div class="kpi-label">{label}</div>'
+                f'<div class="kpi-value" style="color:{color};">{value}</div>'
+                f'<div class="kpi-sub">{sub}</div>'
+                '</div>'
+            )
+        seasonal_cards_html += '</div>'
+        st.markdown(seasonal_cards_html, unsafe_allow_html=True)
+
+        season_tab1, season_tab2, season_tab3 = st.tabs(["📊 Comparison", "🎉 Festival Periods", "📋 Data"])
+
+        # ============================= COMPARISON CHARTS =============================
+        with season_tab1:
+            if not season_summary.empty:
+                st.markdown('<div class="section-title">🌦️ Revenue by Season / Festival</div>', unsafe_allow_html=True)
+                fig = px.bar(
+                    season_summary, x='category', y='revenue', color='category',
+                    color_discrete_map={
+                        "Summer": "#f6a623", "Winter": "#4cc9f0",
+                        "Monsoon": "#5b7bf7", "Festival": "#ff5c6a"
+                    }
+                )
+                fig.update_layout(
+                    template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=320, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="", yaxis_title="Revenue (₹)",
+                    showlegend=False
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                st.markdown('<div class="section-title">📅 Weekend vs Weekday Revenue</div>', unsafe_allow_html=True)
+                fig2 = px.bar(
+                    weekend_summary, x='day_type', y='revenue', color='day_type',
+                    color_discrete_map={"Weekend": "#2ecc91", "Weekday": "#5b7bf7"}
+                )
+                fig2.update_layout(
+                    template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    height=300, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="", yaxis_title="Revenue (₹)",
+                    showlegend=False
+                )
+                st.plotly_chart(fig2, use_container_width=True)
+
+                st.markdown('<div class="section-title">🛒 Average Sale Value Comparison</div>', unsafe_allow_html=True)
+                avg_col1, avg_col2 = st.columns(2)
+                with avg_col1:
+                    fig3 = px.bar(
+                        season_summary, x='category', y='avg_sale_value', color='category',
+                        color_discrete_map={
+                            "Summer": "#f6a623", "Winter": "#4cc9f0",
+                            "Monsoon": "#5b7bf7", "Festival": "#ff5c6a"
+                        }
+                    )
+                    fig3.update_layout(
+                        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        height=280, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="", yaxis_title="Avg Sale (₹)",
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig3, use_container_width=True)
+                with avg_col2:
+                    fig4 = px.bar(
+                        weekend_summary, x='day_type', y='avg_sale_value', color='day_type',
+                        color_discrete_map={"Weekend": "#2ecc91", "Weekday": "#5b7bf7"}
+                    )
+                    fig4.update_layout(
+                        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                        height=280, margin=dict(l=10, r=10, t=20, b=10), xaxis_title="", yaxis_title="Avg Sale (₹)",
+                        showlegend=False
+                    )
+                    st.plotly_chart(fig4, use_container_width=True)
+            else:
+                st.info("No sales data yet — record some sales first to see seasonal comparisons.")
+
+        # ============================= FESTIVAL PERIODS =============================
+        with season_tab2:
+            st.markdown('<div class="section-title">🎉 Define Festival Periods</div>', unsafe_allow_html=True)
+            st.caption("Festival dates change every year, so add the ones relevant to you (e.g. Diwali, Holi, Eid). Sales within these date ranges are counted as 'Festival' instead of their regular season.")
+
+            with st.form("festival_form"):
+                fc1, fc2, fc3 = st.columns(3)
+                with fc1:
+                    festival_name = st.text_input("Festival Name (e.g. Diwali)")
+                with fc2:
+                    festival_start = st.date_input("Start Date", value=datetime.now())
+                with fc3:
+                    festival_end = st.date_input("End Date", value=datetime.now())
+
+                if st.form_submit_button("✅ Add Festival Period"):
+                    if festival_name:
+                        success, msg = SeasonalAnalytics.add_festival_period(
+                            festival_name, festival_start.strftime('%Y-%m-%d'), festival_end.strftime('%Y-%m-%d')
+                        )
+                        if success:
+                            st.success(f"✅ {msg}")
+                            st.rerun()
+                        else:
+                            st.error(f"❌ {msg}")
+                    else:
+                        st.error("❌ Festival name is required.")
+
+            st.markdown('<div class="section-title">📋 Defined Festival Periods</div>', unsafe_allow_html=True)
+            festival_periods = SeasonalAnalytics.get_festival_periods()
+            if festival_periods:
+                for f in festival_periods:
+                    with st.container(border=True):
+                        fpc1, fpc2 = st.columns([4, 1])
+                        with fpc1:
+                            st.write(f"**{f['name']}** — {f['start_date']} to {f['end_date']}")
+                        with fpc2:
+                            if st.button("🗑️ Remove", key=f"del_festival_{f['festival_id']}", use_container_width=True):
+                                SeasonalAnalytics.delete_festival_period(f['festival_id'])
+                                st.rerun()
+            else:
+                st.info("No festival periods defined yet. Add one above (e.g. Diwali, Holi).")
+
+        # ============================= DATA TABLES =============================
+        with season_tab3:
+            st.markdown('<div class="section-title">📊 Season / Festival Breakdown</div>', unsafe_allow_html=True)
+            if not season_summary.empty:
+                st.dataframe(season_summary, use_container_width=True)
+            else:
+                st.info("No data yet.")
+
+            st.markdown('<div class="section-title">📅 Weekend vs Weekday Breakdown</div>', unsafe_allow_html=True)
+            if not weekend_summary.empty:
+                st.dataframe(weekend_summary, use_container_width=True)
+            else:
+                st.info("No data yet.")
 
 elif page == "🔮 Forecasting":
     with st.container(key="forecasting_dashboard"):
