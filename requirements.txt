@@ -1,0 +1,12 @@
+streamlit>=1.45.0
+pandas>=2.3.0
+numpy>=2.3.0
+plotly>=6.0.0
+scikit-learn>=1.7.0
+requests>=2.31.0
+qrcode[pil]>=7.4.0
+openpyxl
+reportlab==4.0.7
+python-dateutil==2.8.2
+tzlocal==5.0.1
+streamlit-option-menu==0.3.2
