@@ -1,0 +1,25 @@
+"""
+Streamlit Cloud Deployment Configuration
+Deploy to Streamlit Cloud for free hosting
+"""
+
+# This file is for Streamlit Cloud deployment
+# Steps to deploy:
+# 1. Push code to GitHub
+# 2. Go to https://share.streamlit.io/
+# 3. Connect your GitHub account
+# 4. Select this repository
+# 5. Choose app.py as the main file
+# 6. Click Deploy
+
+# Streamlit Cloud will automatically:
+# - Install dependencies from requirements.txt
+# - Run the app on a free public URL
+# - Provide SSL certificate
+# - Auto-restart on code changes
+# - Scale automatically
+
+# Your app will be available at:
+# https://[username]-supermarket-project-v1.streamlit.app/
+
+print("Ready for Streamlit Cloud deployment!")
