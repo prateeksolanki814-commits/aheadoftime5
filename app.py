@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import urllib.parse
 import html as html_lib
+import json
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
@@ -31,6 +32,7 @@ from billing import BillingManager
 from employee_management import EmployeeManager, ROLES, ATTENDANCE_STATUSES, SHIFT_NAMES
 from seasonal_analytics import SeasonalAnalytics
 from click_and_collect import ClickAndCollectManager, PICKUP_SLOTS, STATUS_FLOW
+from mood_tester import get_mood_tester_html
 # Page configuration
 st.set_page_config(
     page_title="MVA MART",
@@ -173,6 +175,11 @@ st.markdown("""
         padding: 22px 24px 30px 24px;
     }
     .st-key-click_collect_dashboard {
+        background: linear-gradient(180deg, #0b1220 0%, #111a2e 100%);
+        border-radius: 20px;
+        padding: 22px 24px 30px 24px;
+    }
+    .st-key-mood_tester_dashboard {
         background: linear-gradient(180deg, #0b1220 0%, #111a2e 100%);
         border-radius: 20px;
         padding: 22px 24px 30px 24px;
@@ -593,6 +600,7 @@ NAV_LABELS = {
     "🛒 Sales": "nav_sales",
     "🧾 Billing": "nav_billing",
     "🏬 Click & Collect": "nav_click_collect",
+    "😊 Mood Tester": "nav_mood_tester",
     "👥 Employees": "nav_employees",
     "🤖 AI Customers": "nav_ai_customers",
     "📈 Analytics": "nav_analytics",
@@ -603,6 +611,12 @@ NAV_LABELS = {
     "💰 Discounts": "nav_discounts",
     "📋 Reports": "nav_reports",
 }
+
+# If another part of the app requested a redirect (e.g. AI Customer
+# fulfill -> Click & Collect -> Billing chain), apply it before the
+# sidebar radio widget is created, so it lands on the right page.
+if st.session_state.get('force_nav_page'):
+    st.session_state.main_nav_radio = st.session_state.pop('force_nav_page')
 
 # Sidebar Navigation
 with st.sidebar:
@@ -621,7 +635,8 @@ with st.sidebar:
         "Navigate",
         list(NAV_LABELS.keys()),
         format_func=lambda x: t(NAV_LABELS[x]),
-        label_visibility="collapsed"
+        label_visibility="collapsed",
+        key="main_nav_radio"
     )
     st.markdown("---")
     
@@ -1170,6 +1185,61 @@ elif page == "🧾 Billing":
             unsafe_allow_html=True
         )
 
+        # ---- Order handed off from Click & Collect (via AI Customers) ----
+        # Move it into a stable slot so it survives reruns until staff
+        # actually confirms payment -- we don't want to guess the
+        # payment method or auto-finalize without staff input.
+        if st.session_state.get('pending_bill_transfer'):
+            st.session_state.awaiting_payment_transfer = st.session_state.pop('pending_bill_transfer')
+
+        if st.session_state.get('awaiting_payment_transfer'):
+            transfer = st.session_state.awaiting_payment_transfer
+            st.markdown('<div class="section-title">💳 Complete Payment — Incoming Order</div>', unsafe_allow_html=True)
+            st.info(f"Order from **{transfer['customer_name']}** (AI Customer → Click & Collect) is ready to bill. Choose payment details to generate the invoice.")
+
+            transfer_df = pd.DataFrame(transfer['items'])
+            transfer_df['line_total'] = transfer_df['quantity'] * transfer_df['unit_price']
+            st.dataframe(transfer_df, use_container_width=True)
+            transfer_subtotal = float(transfer_df['line_total'].sum())
+
+            with st.form("transfer_payment_form"):
+                tc1, tc2, tc3 = st.columns(3)
+                with tc1:
+                    transfer_gst_percent = st.selectbox("GST %", [0, 5, 12, 18, 28], index=1, key="transfer_gst")
+                with tc2:
+                    transfer_gst_type = st.selectbox(
+                        "GST Type", ["Intra-State (CGST+SGST)", "Inter-State (IGST)"], key="transfer_gst_type"
+                    )
+                with tc3:
+                    transfer_payment_method = st.radio(
+                        "Payment Method", ["Cash", "UPI", "Card", "Wallet"], horizontal=True, key="transfer_payment"
+                    )
+
+                _, _, _, _, transfer_total = BillingManager.calculate_gst_breakdown(
+                    transfer_subtotal, transfer_gst_percent, transfer_gst_type
+                )
+                st.metric("Total to Collect", f"₹{transfer_total:,.2f}")
+
+                if st.form_submit_button("✅ Confirm Payment & Generate Invoice", use_container_width=True):
+                    success, msg, new_bill_id = BillingManager.create_invoice_from_existing_sale(
+                        transfer['items'],
+                        payment_method=transfer_payment_method,
+                        gst_percent=transfer_gst_percent,
+                        customer_name=transfer['customer_name'],
+                        gst_type=transfer_gst_type,
+                        source_note=f"AI Customer → Click & Collect Order #{transfer['cnc_order_id']}"
+                    )
+                    if success:
+                        st.success(f"✅ {msg} — Bill #{new_bill_id}")
+                        st.session_state.last_bill_id = new_bill_id
+                        st.session_state.auto_print_bill_id = new_bill_id
+                        st.session_state.awaiting_payment_transfer = None
+                        st.rerun()
+                    else:
+                        st.error(f"❌ {msg}")
+
+            st.markdown("---")
+
         recent_bills_kpi = BillingManager.get_recent_bills(limit=100)
         recent_returns_kpi = BillingManager.get_recent_returns(limit=100)
         bills_count = len(recent_bills_kpi)
@@ -1341,18 +1411,44 @@ elif page == "🧾 Billing":
                         gic3.metric("Payment Method", bill['payment_method'])
 
                     receipt_text = BillingManager.generate_thermal_receipt_text(bill, items)
+                    html_receipt = BillingManager.generate_html_receipt(bill, items)
+                    html_receipt_js = json.dumps(html_receipt)  # safely escaped for embedding in JS
 
                     rc1, rc2 = st.columns(2)
                     with rc1:
-                        st.markdown('<div class="section-title">🧾 Thermal Receipt</div>', unsafe_allow_html=True)
-                        escaped_receipt = html_lib.escape(receipt_text)
-                        receipt_print_html = (
-                            f'<pre style="font-family: monospace; font-size:13px; '
-                            f'background:#fff; color:#000; padding:10px; border-radius:6px;">{escaped_receipt}</pre>'
-                            f'<button onclick="window.print()" style="padding:8px 16px; border-radius:6px; '
-                            f'border:none; background:#d63447; color:white; cursor:pointer;">🖨️ Print Receipt</button>'
+                        st.markdown('<div class="section-title">🧾 Print Bill</div>', unsafe_allow_html=True)
+
+                        is_auto_print = st.session_state.get('auto_print_bill_id') == bill['bill_id']
+                        if is_auto_print:
+                            st.info("✅ Bill ready — click below to open and print it.")
+                            st.session_state.pop('auto_print_bill_id', None)
+
+                        # Opens the restaurant-style bill in a genuine new
+                        # browser window/tab and triggers print there.
+                        # Built via string concatenation (not an f-string)
+                        # so the JS's own { } braces are never mistaken
+                        # for Python format placeholders.
+                        print_window_html = (
+                            '<button id="printBillBtn" style="padding:12px 22px; border-radius:8px; '
+                            'border:none; background:#d63447; color:white; cursor:pointer; font-size:15px; '
+                            'font-weight:600; width:100%;">🖨️ Print Bill (Opens New Window)</button>'
+                            '<script>'
+                            'document.getElementById("printBillBtn").addEventListener("click", function() {'
+                            '  var billHtml = ' + html_receipt_js + ';'
+                            '  var w = window.open("", "_blank");'
+                            '  if (w) {'
+                            '    w.document.open();'
+                            '    w.document.write(billHtml);'
+                            '    w.document.close();'
+                            '    w.focus();'
+                            '    setTimeout(function() { w.print(); }, 300);'
+                            '  } else {'
+                            '    alert("Please allow pop-ups for this site to print the bill.");'
+                            '  }'
+                            '});'
+                            '</script>'
                         )
-                        components.html(receipt_print_html, height=480, scrolling=True)
+                        components.html(print_window_html, height=70)
 
                         st.download_button(
                             "⬇️ Download Receipt (.txt)",
@@ -1493,6 +1589,24 @@ elif page == "🏬 Click & Collect":
             unsafe_allow_html=True
         )
         st.caption("Order online, pick up in-store — no delivery needed.")
+
+        # ---- Auto-process any order handed off from AI Customers ----
+        if st.session_state.get('pending_cnc_transfer'):
+            transfer = st.session_state.pop('pending_cnc_transfer')
+            success, msg, new_order_id = ClickAndCollectManager.place_order(
+                transfer['customer_name'], "", PICKUP_SLOTS[0], transfer['items']
+            )
+            if success:
+                st.success(f"✅ {msg} — auto-created for {transfer['customer_name']} (Order #{new_order_id})")
+                st.session_state.pending_bill_transfer = {
+                    "cnc_order_id": new_order_id,
+                    "customer_name": transfer['customer_name'],
+                    "items": transfer['items']
+                }
+                st.session_state.force_nav_page = "🧾 Billing"
+                st.rerun()
+            else:
+                st.error(f"❌ Couldn't complete this order automatically: {msg}")
 
         all_cnc_orders = ClickAndCollectManager.get_orders(limit=200)
         placed_count = len([o for o in all_cnc_orders if o['status'] == 'Placed'])
@@ -1660,6 +1774,17 @@ elif page == "🏬 Click & Collect":
                 st.dataframe(orders_df, use_container_width=True)
             else:
                 st.info("No orders yet.")
+
+elif page == "😊 Mood Tester":
+    with st.container(key="mood_tester_dashboard"):
+        st.markdown(
+            '<div class="dash-header"><div class="dash-header-icon">😊</div>'
+            f'<div class="dash-header-title">{t("mood_tester_header")}</div></div>',
+            unsafe_allow_html=True
+        )
+        st.caption("🎉 A fun bonus feature — scans your face for a demo 'mood reading'. Not a real emotion-detection AI, not medical or scientific — just for fun!")
+        components.html(get_mood_tester_html(), height=2600, scrolling=True)
+        st.caption("💡 Note: this runs entirely in your browser (camera, animations, charts). Its scan history is separate from the rest of MVA Mart and resets if you refresh the page.")
 
 elif page == "👥 Employees":
     with st.container(key="employees_dashboard"):
@@ -1921,12 +2046,26 @@ elif page == "🤖 AI Customers":
                             reject_clicked = st.button(t("btn_reject"), key=f"reject_{order['order_id']}", use_container_width=True)
 
                         if fulfill_clicked:
-                            success, msg = AICustomerManager.fulfill_order(order['order_id'])
+                            success, handed_off_order = AICustomerManager.hand_off_to_fulfillment(order['order_id'])
                             if success:
-                                st.success(msg)
+                                product = InventoryManager.get_product_by_id(handed_off_order['product_id'])
+                                if product:
+                                    st.session_state.pending_cnc_transfer = {
+                                        "customer_name": handed_off_order['customer_name'],
+                                        "items": [{
+                                            "product_id": handed_off_order['product_id'],
+                                            "product_name": handed_off_order['product_name'],
+                                            "quantity": handed_off_order['quantity'],
+                                            "unit_price": float(product[4])
+                                        }]
+                                    }
+                                    st.session_state.force_nav_page = "🏬 Click & Collect"
+                                    st.success(f"✅ Order accepted! Sending to Click & Collect for {handed_off_order['customer_name']}...")
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Product no longer exists.")
                             else:
-                                st.error(msg)
-                            st.rerun()
+                                st.error("❌ Could not process this order.")
 
                         if reject_clicked:
                             success, msg = AICustomerManager.reject_order(order['order_id'])
